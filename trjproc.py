@@ -2102,7 +2102,7 @@ class AnalysisPackage.LinearRegression(object):
             # convergence is achieved.
             theta = lr.train(alpha=0.01)
             # Load some test data (this example is the bond angles and bond lengths along a BOMD simulation trajectory).
-            test_data = np.loadtxt("time_angle_bonds_allpt_trj0.txt", skiprows=1)
+            test_data = np.loadtxt("example_angle_bonds.txt", skiprows=1)
             # Generate the features from bond angles and bond lengths similarly.
             test_rawfeature = lr.gen_feature_TdD2dC2vC3vCs(test_data)
             # Predict the answers
