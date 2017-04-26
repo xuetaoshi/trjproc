@@ -801,9 +801,9 @@ Example:
         means is acceptable but the list_of_names should reflect that. A check will be performed on this list to make
         sure it corresponds to each item in list_of_data."""
         name_short_retro = {i: j for j, i in self.data_name_short.items()}
-        if len(list_of_data) is None:
+        if list_of_data is None:
             list_of_data = self.data_read
-        if len(list_of_names) is None:
+        if list_of_names is None:
             list_of_names = self.data_type_list
         if len(list_of_data) != len(list_of_names):
             raise Exception("Length of list_of_data not equal to length of list_of_names!")
