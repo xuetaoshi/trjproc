@@ -211,15 +211,10 @@ UtilityPackage.regulate_data(data, threshold_reg, axis_time=0)
 class FileRead(object):
     """Read Gaussian trajectory log file based on regex patterns and then do proper processing.
 
-Initialization: FileRead(file_str="", n_atom=-1)
+Initialization: FileRead( n_atom=-1)
     The initialization of this object will attempt to determine the number of atoms in the molecule and set up a pattern
     dictionary, partially based on the number of atoms.
-    Parameters: file_str: string, python File object
-                    optional. However, if both this and the next optional argument were not passed in during
-                    initialization, an error would be raised. This argument corresponds to either string of a log file,
-                    or the file handle of such file from which the initialization attempts to determine the number of
-                    atoms if not directly passed in by the next argument.
-                n_atom: integer
+    Parameters: n_atom: integer
                     optional, default=-1, which is a flag to signify this value was not directly passed in. This gives
                     the number of atoms in the molecule for the Gaussian log files to read.
 
@@ -282,23 +277,33 @@ FileRead.findall(file_str, data_type)
         Array cts is now a multi-dimensional array containing such data. cts[points, n_atoms, xyz]
     """
 
-    def __init__(self, file_str="", n_atom=-1):
+    def __init__(self, n_atom=-1):
+        self.pattern_dict = {}
         if n_atom == -1:  # This is when FileRead object was created without n_atom specified.
-            if file_str == "":
-                raise Exception("Expected to read number of atoms from file, "
-                                "but did not pass in file handle or file string itself!")
-            else:
-                if hasattr(file_str, 'read'):
-                    temp_file = file_str.read()
-                    file_str.seek(0, 0)  # Reset file handle so it could be used for actual reading data
-                elif isinstance(file_str, str):
-                    temp_file = file_str
-                else:
-                    raise Exception("Wrong type of file handle passed in file_read class!")
-                pa_atom = r"NAtoms= +(\d+)"
-                self.n_atom = int(re.compile(pa_atom, re.M).search(temp_file).group(1))
+            self.flag_init = False
         else:
             self.n_atom = n_atom
+            self.init_pattern()
+            self.flag_init = True
+
+    def __add_pattern(self, key, pattern):
+        self.pattern_dict[key] = pattern
+
+    def get_pattern_keys(self):
+        return [key for key, value in self.pattern_dict.items()]
+
+    def init_natom(self, raw_str):
+        if len(raw_str) > 300*80:
+            init_str = raw_str[:300*80]
+        else:
+            init_str = raw_str
+        pa = re.compile(r" Stoichiometry +([A-Za-z]+)", re.M)
+        pr = pa.findall(init_str)
+        if len(pr) == 0:
+            raise Exception("Failed to find atom number in init_natom()!")
+        self.n_atom = len([i for i in pr[0] if i.isupper()])
+
+    def init_pattern(self):
         # This dictionary defines the regex strings for reading various physical quantities that are available in
         # a Gaussian trajectory log file. The key of each item in this dictionary has no significance except for the
         # part following "#": #VarRow signifies variable number of rows to read and #VarColumn variable number of
@@ -330,12 +335,6 @@ FileRead.findall(file_str, data_type)
                              r" +Y= +([\-+]*[.\d]+D*[\-+]*[\d]*) +Z= +([\-+]*[.\d]+D*[\-+]*[\d]*)"
         }
 
-    def __add_pattern(self, key, pattern):
-        self.pattern_dict[key] = pattern
-
-    def get_pattern_keys(self):
-        return [key for key, value in self.pattern_dict.items()]
-
     @staticmethod
     def str_process_fixed_dim(raw_string, pa):
         pc = re.compile(pa, re.M)
@@ -352,7 +351,8 @@ FileRead.findall(file_str, data_type)
     def str_process_var_row(raw_string, pa, n_row):
         pc = re.compile(pa, re.M)
         arr1 = np.array(pc.findall(raw_string))  # Makes character numpy array
-        arr1[arr1 == ''] = '0.0'
+        if len(arr1) == 0:
+            return np.array([])
         arr2 = np.core.defchararray.replace(arr1, 'D', 'e')  # Scientific notation is labeled by "D" in Gaussian output
         arr3 = np.array(arr2, dtype=float)
         if arr3.shape[1] % n_row != 0:
@@ -384,8 +384,11 @@ FileRead.findall(file_str, data_type)
             file_actual = file_str
         else:
             raise Exception("Wrong type of file handle passed in file_read class!")
+        if not self.flag_init:  # Pattern and n_atom were not initialized yet
+            self.init_natom(file_actual)
+            self.init_pattern()
         if data_type not in self.get_pattern_keys():
-            raise Exception("Unable to find ",data_type," in pattern dictionary key list!")
+            raise Exception("Unable to find ", data_type, " in pattern dictionary key list!")
         else:
             key, pa = data_type, self.pattern_dict[data_type]
             if "#VarRow" in key:
@@ -517,7 +520,7 @@ ArrayTrim.set_extra_trim(ex_par)
 
 class MassRead(FileRead, ArrayTrim):
     """Read multiple types of data from multiple log files and store them into numpy npz files after being trimmed
-     according to how such type of data is normally printed out in Gaussian log files.
+    according to how such type of data is normally printed out in Gaussian log files.
 Initialization: MassRead(n_log=-1, log_list=0, ext=".log", init_fh=None, input_dir="", output_dir="",
                      data_type=None)
     Parameters: data_type: python list
@@ -665,7 +668,7 @@ Example:
             self.read_operator = FileRead(n_atom=init_n_atom)
             self.trim_operator = ArrayTrim(max_pts=init_max_pts)
         elif type(init_fh) is str or hasattr(init_fh, 'read'):
-            self.read_operator = FileRead(file_str=init_fh)
+            self.read_operator = FileRead()
             self.trim_operator = ArrayTrim(file_str=init_fh)
         else:
             raise Exception("Wrong type of init_fh parameter was passed in MassRead!")
@@ -773,9 +776,7 @@ Example:
         if len(log_list) == 0:
             raise Exception("Empty log_list in MassRead.read()! ")
         if self.read_operator is None:
-            with open(self.input_dir + log_list[0], "r") as fh:
-                temp_str = fh.read()
-            self.read_operator = FileRead(file_str=temp_str)
+            self.read_operator = FileRead()
         if self.trim_operator is None:
             with open(self.input_dir + log_list[0], "r") as fh:
                 temp_str = fh.read()
@@ -2102,7 +2103,7 @@ class AnalysisPackage.LinearRegression(object):
             # convergence is achieved.
             theta = lr.train(alpha=0.01)
             # Load some test data (this example is the bond angles and bond lengths along a BOMD simulation trajectory).
-            test_data = np.loadtxt("example_angle_bonds.txt", skiprows=1)
+            test_data = np.loadtxt("time_angle_bonds_allpt_trj0.txt", skiprows=1)
             # Generate the features from bond angles and bond lengths similarly.
             test_rawfeature = lr.gen_feature_TdD2dC2vC3vCs(test_data)
             # Predict the answers
@@ -2604,6 +2605,8 @@ class AnalysisPackage.LinearRegression(object):
             else:
                 data_raw = np.load(dir_in + slash + data_name)
         else:
+            if data_name is None:
+                data_name = "default_name"
             data_raw = data
         if type(data_raw) is np.lib.npyio.NpzFile:
             data_proc = [data_raw["arr_" + str(i)] for i in range(len(data_raw.files))]
@@ -2612,7 +2615,7 @@ class AnalysisPackage.LinearRegression(object):
             data_proc = data_raw
             n_pt_max = np.max([data_raw[i].shape[axis_time] for i in range(len(data_raw))])
         else:
-            raise Exception("Wrong type of etot!")
+            raise Exception("Wrong type of data!")
         if msg_print:
             print("Max #points: ", n_pt_max)
         if axis_time != 0:
