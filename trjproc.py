@@ -2639,7 +2639,7 @@ class AnalysisPackage.LinearRegression(object):
             print("after", diss)
         n_trans = np.prod(data.shape[:1] + data.shape[2:])
         scales = None
-        if n_trans > 200:
+        if n_trans > 100:
             power_allch_list = list()
             i = 0
             for data_piece in np.array_split(data, np.ceil(n_trans / 100)):
@@ -2648,22 +2648,25 @@ class AnalysisPackage.LinearRegression(object):
                 wa_piece = wavelets.WaveletAnalysis(data_piece - np.mean(data_piece, axis=1)[:, np.newaxis, ...],
                                                     wavelet=wavelets.Morlet(w0=12), axis=1, unbias=True)
                 # The scale dimension from CWT will be inserted at the first dimension
-                power_allch_list.append(np.sum(wa_piece.wavelet_power, axis=tuple(range(len(data.shape) + 1))[3:]))
+                power_allch_list.append(wa_piece.wavelet_power)
                 if i == 0:
                     scales = wa_piece.scales
                 gc.collect()
                 i += 1
             power_allch = np.concatenate(power_allch_list, axis=1)
             power_perch = [power_allch[:, diss[i] != -1, ...] for i in list(range(len(diss)))]
-            power_sum = np.array([np.mean(item, axis=1) for item in power_perch])
+            print([tuple(range(len(item.shape)))[3:] for item in power_perch])
+            power_sum = np.array([np.mean(np.sum(item, axis=tuple(range(len(item.shape)))[3:]), axis=1)
+                                  for item in power_perch])
         else:
             wa_allch = wavelets.WaveletAnalysis(data - np.mean(data, axis=1)[:, np.newaxis, ...],
                                                 wavelet=wavelets.Morlet(w0=12), axis=1, unbias=True)
             power_allch = wa_allch.wavelet_power
             scales = wa_allch.scales
-            power_perch = [np.sum(power_allch[:, diss[i] != -1, ...], axis=tuple(range(len(data.shape) + 1))[3:])
+            power_perch = [power_allch[:, diss[i] != -1, ...]
                            for i in list(range(len(diss)))]
-            power_sum = np.array([np.mean(item, axis=1) for item in power_perch])
+            power_sum = np.array([np.mean(np.sum(item, axis=tuple(range(len(item.shape)))[3:]), axis=1)
+                                  for item in power_perch])
         if save:
             data_name_out = data_name.split(".")[0]
             np.save(self.dir_out + self.slash + "wavelet_scales.npy", scales)
@@ -2806,3 +2809,393 @@ class AnalysisPackage.LinearRegression(object):
             etot_str = np.vstack((np.array(["Entry No." + str(i) for i in range(n_trj_max)], dtype=np.dtype('U16')),
                                   etot_char))
             writer.writerows(np.transpose(etot_str))
+
+
+class WorkFlow(FragGen):
+    """This work flow class is designed for working in a single set of data, from reading various types of data to
+    select trajectories based on Mulliken charge test, total energy test and dissociation test, to numerous analysis
+    procedures."""
+    def __init__(self, dir_in, dir_out):
+        import os
+        FragGen.__init__(self)
+        self.dir_in = dir_in
+        self.dir_out = dir_out
+        if '/' in os.getcwd():
+            slash = '/'
+        elif '\\' in os.getcwd():
+            slash = '\\'
+        else:
+            raise Exception("Error in finding directory separator.")
+        self.slash = slash
+        self.dir_in = self.dir_in.rstrip(slash)
+        self.dir_out = self.dir_out.rstrip(slash)
+
+    def read_continuous(self, n_log, data_type=None, ext=".log", save=True):
+        # Reading from trajectory log files that has file names in a continuous form such as: 1.log, 2.log, 3.log, ...,
+        #  n_log.log
+        reader = MassRead(n_log=n_log, ext=ext, input_dir=self.dir_in, output_dir=self.dir_out)
+        if data_type is not None:
+            shorhand_dict = {value: key for key, value in reader.data_name_short}
+            if type(data_type) is str:
+                if data_type in reader.data_type_list:
+                    reader.data_type_list = [data_type]
+                elif data_type in shorhand_dict:
+                    reader.data_type_list = [shorhand_dict[data_type]]
+                else:
+                    raise Exception("data_type is str, but could not find available type to read in MassRead.")
+            elif type(data_type) is list:
+                type_list = list()
+                for idata in data_type:
+                    if idata in reader.data_type_list:
+                        type_list.append(idata)
+                    elif idata in shorhand_dict:
+                        type_list.append(shorhand_dict[idata])
+                if len(type_list) == 0:
+                    raise Exception("Could not find any available type to read in MassRead.")
+                reader.data_type_list = type_list
+            else:
+                raise Exception("Wrong type for data_type was passed in.")
+        data = reader.read()
+        if save:
+            reader.save(data)
+        return data
+
+    def select_no_charge_test(self, read_then_select=True, etot_name="Etot.npz", cts_name="xyz.npz", rule_str=None,
+                              frag_gen=False, rule_identifier="Channel", break_factor=1.5, remain_factor=1.5,
+                              rule_delim=";", rule_precision=2, cts_unit="Bohr", value_unit="Angstrom",
+                              recombination=True, save=False):
+        # Select trajectories without the Mulliken charge test, which is to test unphysically fast charge fluctuation
+        # during laser pulse. Obviously this method is for trajectories without laser field.
+        if read_then_select:
+            dir_in = self.dir_out
+        else:
+            dir_in = self.dir_in
+        etot = np.load(dir_in + self.slash + etot_name)
+        if rule_str is None:
+            cts = None
+        else:
+            cts = np.load(dir_in + self.slash + cts_name)
+        whitelist = TrjScreen.screen_bundle(etot, n_cutoff=1)
+        fh_flag = False
+        if type(rule_str) is str:
+            # The following happens when rule_str is rule definition itself.
+            if ">" in rule_str or "<" in rule_str or "=" in rule_str:
+                pass
+            elif self.slash in rule_str:  # This happens when rule_str is a full file directory
+                rule_str = open(rule_str, "r")
+                fh_flag = True
+            else:
+                rule_str = open(self.dir_in + self.slash + rule_str, "r")
+                fh_flag = True
+        if frag_gen:
+            if rule_str is None:
+                rules = None
+            else:
+                rules = rule_str
+        else:
+            rules = rule_str
+        if rules is not None:
+            if frag_gen:
+                detector = DissociationDetect(cts, rules, frag_gen=True, frag_identifier=rule_identifier,
+                                              frag_break_factor=break_factor, frag_remain_factor=remain_factor,
+                                              frag_delim=rule_delim, frag_precision=rule_precision, cts_unit=cts_unit,
+                                              value_unit=value_unit, whitelist=whitelist)
+            else:
+                detector = DissociationDetect(cts, rules, cts_unit=cts_unit, value_unit=value_unit, whitelist=whitelist)
+            diss = detector.dissociation_detect(recombination=recombination)
+            pinpoint = detector.pinpoint_gen(whitelist, length_laser=0, diss=diss)
+        else:
+            diss = None
+            pinpoint = None
+        if save:
+            np.save(self.dir_out + self.slash + "whitelist.npy", whitelist)
+            if rules is not None:
+                np.save(self.dir_out + self.slash + "diss.npy", diss)
+                np.save(self.dir_out + self.slash + "pinpoint.npy", pinpoint)
+        if fh_flag:
+            rule_str.close()
+        return whitelist, diss, pinpoint
+
+    def select_with_charge_test(self, read_then_select=True, etot_name="Etot.npz", mlk_name="MlkC.npz",
+                                mlk_test_name="MlkCtest.npy", whitelist_name="whitelist.npy",
+                                pinpoint_name="pinpoint.npy", diss_name="diss.npy", reload=True, n_cutoff=374,
+                                charge_threshold=0.9, n_threshold=94,threshold=0.01, pre_thresh=100, cts_name="xyz.npz",
+                                rule_str=None, frag_gen=False,rule_identifier="Channel", break_factor=1.5,
+                                remain_factor=1.5, rule_delim=";",rule_precision=2, cts_unit="Bohr",
+                                value_unit="Angstrom", recombination=True,save=False):
+        # Select trajectories with the Mulliken charge test, which is to test unphysically fast charge fluctuation
+        # during laser pulse. Obviously this method is for trajectories with laser field. The following parameters are
+        # specifically for this charge test:
+        # n_cutoff: the number of time steps the entire laser spans;
+        # n_threshold: the number of time steps one laser cycle spans;
+        # charge_threshold: charge scanning from -charge_threshold to +charge_threshold.
+        if read_then_select:
+            dir_in = self.dir_out
+        else:
+            dir_in = self.dir_in
+        etot = np.load(dir_in + self.slash + etot_name)
+        if os.path.isfile(dir_in + self.slash + mlk_test_name) and reload:
+            mlk_test = np.load(dir_in + self.slash + mlk_test_name)
+        else:
+            mlk = np.load(dir_in + self.slash + mlk_name)
+            mlk_test = TrjScreen.mlk_test(mlk, n_cutoff=n_cutoff, charge_threshold=charge_threshold,
+                                          n_threshold=n_threshold)
+            if type(mlk_test) is np.ma.core.MaskedArray:
+                mlk_test = np.array(mlk_test, dtype=bool)
+        if rule_str is None:
+            cts = None
+        else:
+            cts = np.load(dir_in + self.slash + cts_name)
+        if os.path.isfile(dir_in + self.slash + whitelist_name) and reload:
+            whitelist = np.load(dir_in + self.slash + whitelist_name)
+        else:
+            whitelist = TrjScreen.screen_bundle(etot, mlk_test_results=mlk_test, n_cutoff=n_cutoff, threshold=threshold,
+                                            pre_thresh=pre_thresh)
+        fh_flag = False
+        if type(rule_str) is str:
+            # The following happens when rule_str is rule definition itself.
+            if ">" in rule_str or "<" in rule_str or "=" in rule_str:
+                pass
+            elif self.slash in rule_str:  # This happens when rule_str is a full file directory
+                rule_str = open(rule_str, "r")
+                fh_flag = True
+            else:
+                rule_str = open(self.dir_in + self.slash + rule_str, "r")
+                fh_flag = True
+        if frag_gen:
+            if rule_str is None:
+                rules = None
+            else:
+                rules = rule_str
+        else:
+            rules = rule_str
+        if os.path.isfile(dir_in + self.slash + diss_name) and reload:
+            diss = np.load(dir_in + self.slash + diss_name)
+            if os.path.isfile(dir_in + self.slash + pinpoint_name) and reload:
+                pinpoint = np.load(dir_in + self.slash + pinpoint_name)
+            elif rules is not None:
+                if frag_gen:
+                    detector = DissociationDetect(cts, rules, frag_gen=True, frag_identifier=rule_identifier,
+                                                  frag_break_factor=break_factor, frag_remain_factor=remain_factor,
+                                                  frag_delim=rule_delim, frag_precision=rule_precision,
+                                                  cts_unit=cts_unit,
+                                                  value_unit=value_unit, whitelist=whitelist)
+                else:
+                    detector = DissociationDetect(cts, rules, cts_unit=cts_unit, value_unit=value_unit,
+                                                  whitelist=whitelist)
+                pinpoint = detector.pinpoint_gen(whitelist, length_laser=n_cutoff, diss=diss)
+            else:
+                pinpoint = None
+        elif rules is not None:
+            if frag_gen:
+                detector = DissociationDetect(cts, rules, frag_gen=True, frag_identifier=rule_identifier,
+                                              frag_break_factor=break_factor, frag_remain_factor=remain_factor,
+                                              frag_delim=rule_delim, frag_precision=rule_precision, cts_unit=cts_unit,
+                                              value_unit=value_unit, whitelist=whitelist)
+            else:
+                detector = DissociationDetect(cts, rules, cts_unit=cts_unit, value_unit=value_unit, whitelist=whitelist)
+            diss = detector.dissociation_detect(recombination=recombination)
+            if os.path.isfile(dir_in + self.slash + pinpoint_name) and reload:
+                pinpoint = np.load(dir_in + self.slash + pinpoint_name)
+            else:
+                pinpoint = detector.pinpoint_gen(whitelist, length_laser=n_cutoff, diss=diss)
+        else:
+            diss = None
+            pinpoint = None
+        if save:
+            np.save(self.dir_out + self.slash + mlk_test_name, mlk_test)
+            np.save(self.dir_out + self.slash + "whitelist.npy", whitelist)
+            if rules is not None:
+                np.save(self.dir_out + self.slash + "diss.npy", diss)
+                np.save(self.dir_out + self.slash + "pinpoint.npy", pinpoint)
+        if fh_flag:
+            rule_str.close()
+        return mlk_test, whitelist, diss, pinpoint
+
+
+class GetDir(object):
+    """Get directory from routine_list"""
+    def __init__(self, routine_list):
+        with open(routine_list,"r") as fh:
+            self.str = fh.readlines()
+
+    def rout_dir(self):
+        return [line.split(";")[2] for line in self.str]
+#
+# input_par = "/Volumes/XSHI/BOMD/OUTPUT/CH4+_FldFree_with0ptE"
+# output_par2 = "/Users/xuetaoshi/Documents/CH4+_1/CH4+_FldFree_with0ptE"
+# output_par = "/Users/xuetaoshi/Documents/test_read"
+# output_par3 = "/Users/xuetaoshi/Documents/ClCHO+_singleL1/ClCHO+_Lin0xFiStr0p03WL10p5Cos16C"
+# wf = WorkFlow(output_par3, output_par)
+# diss_csv = wf.diss2csv(name="diss")
+# fg = FragGen()
+# fg.comb_gen(["H","H","C"])
+# line = "C 1 1.3 3 2.3 4 2.1"
+# lines_mol = """C
+# C
+# H
+# H
+# H
+# H
+# H 1 1.2 3 3.4
+# H 4 2.5
+# C 1 2.2"""
+# lines_frag1 = """H
+# C 2 1.0
+# H"""
+# lines_frag2 = """H
+# H"""
+# lines_frag3 = """C"""
+# lines_frag = """H 2 1.0
+# # H """
+
+# lines_mol = """C
+# H 1 1.0
+# H 1 1.0
+# C 1 1.8
+# H 1 1.0
+# H 4 1.0
+# H 4 1.0
+# H 4 1.0"""
+# lines_frag1 = """H
+# H 1 1.1 3 1.1
+# H 1 1.1"""
+# # rule_str=fg.frag_gen(lines_mol.split("\n"),[lines_frag1.split("\n"),lines_frag2.split("\n"),lines_frag3.split("\n")])
+# lines = """C
+# H 1 1.0
+# H 1 1.0
+# C 1 1.8
+# H 1 1.0
+# H 4 1.0
+# H 4 1.0
+# H 4 1.0
+#
+# Channel 1:
+# H
+# H 1 1.1 3 1.1
+# H 1 1.1
+#
+# Channel 2:
+# C
+# H 1 1.5
+# H 1 1.5
+# H 1 1.5
+#
+# """
+# # rule_str=fg.frag_gen(lines_mol.split("\n"),[lines_frag1.split("\n")])
+# rule_str=fg.rule_gen(lines)
+# rule_list = DissociationDetect.str2logic_multiple(rule_str)
+# print("rule_list", rule_list)
+# print(rule_str)
+
+
+# print([len(line.split("or")) for line in rule_str.splitlines()])
+# print(len([print(i) for i in rule_str.split("or")]))
+# print(fg.com_gen(lines_raw.split("\n")))
+# print(fg.line_parser(line))
+# mlk = np.load(output_par3+"/"+"MlkC.npz")
+# # mlk_test = TrjScreen.mlk_test(mlk,n_cutoff=2242,n_threshold=141)
+# mlk_test = np.load(output_par3+"/"+"mlk_test_results.npy")
+# # np.save(output_par3+"/"+"mlk_test_results.npy",mlk_test.filled(False))
+# etot = np.load(output_par3+"/"+"etot.npz")
+# whitelist = TrjScreen.screen_bundle(etot, mlk_test_results=mlk_test, n_cutoff=2242)
+# # [print(i) for i in whitelist]
+# cts = np.load(output_par3+'/'+"xyz.npz")
+# rule="""1-2 > 2.2 ; 1-4 < 3.36 or 1-2 < 2.2 ; 1-4 > 3.36
+# 1-2 > 2.2 ; 1-4 > 3.36 ; 2-4 < 2.66
+# 1-2 > 2.2 ; 1-4 > 3.36 ; 2-4 > 2.66
+# 1-2 < 2.2 ; 1-4 < 3.36"""
+# # rule="1-2 < 2.2 ; 1-4 < 3.36"
+# dd = DissociationDetect(cts,rule,whitelist=whitelist)
+# # dd = DissociationDetect(cts, rule, )
+# diss = dd.dissociation_detect()
+# print(diss)
+# pp = dd.pinpoint_gen(whitelist, length_laser=2242)
+# print(pp)
+# np.save("pinpoint.npy",pp)
+# diss=[DissociationDetect(cts['arr_'+str(i)], rule,
+#                          atom_list=['C', 'H', 'O', 'Cl']).dissociation_detect(whitelist=whitelist[i])
+#       for i in list(range(100))]
+# print(diss)
+# dir_list = GetDir("/Users/xuetaoshi/Documents/routine_list_CH4+_3copy.txt").rout_dir()
+# diss_avg_list = list()
+# dissl1=list()
+# dissl2=list()
+# for dir in dir_list:
+#     diss = np.load("/Users/xuetaoshi/Documents/CH4+_3/" + dir + "/diss.npy")
+#     diss_mask = np.ma.masked_where(diss == -1, diss)
+#     diss_avg=np.mean(diss_mask,axis=1)
+#     diss_nmb = np.sum(diss_mask.filled(0)>0, axis=1)
+#     diss1 = np.sum((diss_avg * diss_nmb)[:4])/np.sum(diss_nmb[:4])
+#     diss2 = np.sum((diss_avg * diss_nmb)[4:10]) / np.sum(diss_nmb[4:10])
+#     diss_avg_list.append(np.sum((diss_avg * diss_nmb)[:10])/np.sum(diss_nmb[:10]))
+#     print(diss_nmb,diss1,diss2,np.sum((diss_avg * diss_nmb)[:10])/np.sum(diss_nmb[:10]))
+#     dissl1.append(diss1)
+#     dissl2.append(diss2)
+# np.savetxt("test_diss1.csv",np.ma.masked_array(dissl1),fmt="%.1f",delimiter=",")
+# np.savetxt("test_diss2.csv",np.ma.masked_array(dissl2),fmt="%.1f",delimiter=",")
+# np.savetxt("test_diss.csv",np.ma.masked_array(list(zip(dissl1,dissl2,diss_avg_list))),fmt="%.1f",delimiter=",")
+#
+#np.savetxt("test_avg.csv",np.ma.masked_array(diss_avg_list),fmt="%.1f",delimiter=",")
+# mlk = np.load(output_par3+"/"+"MlkC.npz")
+# mlktest = TrjScreen(n_cutoff=2242,n_threshold=141)
+# result = mlktest.test(mlk)
+# print(np.where(result))
+# mr = MassRead(n_log=100, input_dir=input_par, output_dir=output_par)
+# for data in mr.data_type_list:
+#     re1=np.load(output_par+"/"+mr.data_name_short[data]+".npz")
+#     re2=np.load(output_par2+"/"+mr.data_name_short[data]+".npz")
+#     diff=np.sum(np.array([np.sum(re1["arr_"+str(i)]-re2["arr_"+str(i)]) for i in list(range(100))]))
+#     print(data,diff)
+# print('Before read Current time: ',datetime.datetime.time(datetime.datetime.now()))
+# data = mr.read()
+# mr.save(data)
+# print('After save Current time: ',datetime.datetime.time(datetime.datetime.now()))
+# fh_test=open("test.txt","r")
+# mass1=MassRead(log_list=fh_test,ext=".txt")
+# fh_test.close()
+# print(mass1.log_list)
+# trim = ArrayTrim(file1)
+# trim.set_extra_trim(-10)
+# print("max points: ",trim.max_pts)
+# arr1=np.arange(100)
+# print("trim1: ",trim.trim(arr1,"Dipole Moment").shape)
+# print("before: ",arr1[:10],trim.trim(arr1,"Dipole Moment")[:10])
+# print("trim2: ",trim.trim(arr1,"Time").shape)
+# print("before: ",arr1[:10],trim.trim(arr1,"Time")[:10])
+#
+# arr2=np.arange(trim.max_pts+2)
+# print("trim1: ",trim.trim(arr2,"Dipole Moment").shape)
+# print("before: ",arr2[:10],trim.trim(arr2,"Dipole Moment")[:10],arr2[-10:],trim.trim(arr2,"Dipole Moment")[-10:])
+# print("trim2: ",trim.trim(arr2,"Time").shape)
+# print("before: ",arr2[:10],trim.trim(arr2,"Time")[:10],arr2[-10:],trim.trim(arr2,"Dipole Moment")[-10:])
+# # di1=read.findall(file1,"Dipole Moment")
+# di2=read.findall(file2,"Dipole Moment")
+# print(di1.shape)
+# print("di1",di1[:10])
+# print(di2.shape)
+# print("di2",di2[:10])
+# #
+# # Command line options defined here
+# arg_parser = argparse.ArgumentParser(description='i/o options')
+# arg_parser.add_argument("-n", "--name_list", type=str, help="name of the name list files to extract",
+#                         default='name_list.txt')
+# arg_parser.add_argument("-i", "--input", type=str, help="Input file path", default="/Users/xuetaoshi/Documents")
+# arg_parser.add_argument("-o", "--output", type=str, help="Output directory", default=os.getcwd())
+#
+# args = arg_parser.parse_args()
+# # End of command line options
+# with open(args.input + '/' + args.name_list, "r") as file_str_in:
+#     for line in file_str_in:
+#         if '.inp' in line:
+#             fname = line.strip().replace('.inp', '.log')
+#         elif '.' in line:
+#             fname = line.strip()
+#         else:
+#             fname = line.strip() + '.log'
+#         with open(args.input + '/' + fname) as file_str_log:
+#             file_read = FileRead(file_str_log, ["Electric Field Alt"])
+#             arr = file_read.findall_list()[0]
+#             print(arr.shape)
+#             np.savetxt(args.output + '/' + fname.replace('.log', '.txt').replace('_', ''), arr, fmt="%f")
+#
