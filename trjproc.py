@@ -2672,10 +2672,10 @@ class AnalysisPackage.LinearRegression(object):
             np.save(self.dir_out + self.slash + "wavelet_scales.npy", scales)
             np.savez(self.dir_out + self.slash + "wavelet_power_each_channel_" + data_name_out + ".npz", *power_perch)
             np.save(self.dir_out + self.slash + "wavelet_power_sum_" + data_name_out + ".npy", power_sum)
-            np.savetxt(self.dir_out + self.slash + "wavelet_scales.txt", scales, fmt="%.10f")
+            np.savetxt(self.dir_out + self.slash + "wavelet_scales.txt", scales, fmt="%.10e")
             for i in list(range(len(power_sum))):
                 np.savetxt(self.dir_out + self.slash + "wavelet_power_sum_" + data_name_out + "_ch" + str(i + 1)
-                           + ".txt", power_sum[i, ...], fmt="%.10f")
+                           + ".txt", power_sum[i, ...], fmt="%.10e")
         return scales, power_perch, power_sum
 
     def save_cwt(self, data_name, power_perch, power_sum):
@@ -2686,7 +2686,7 @@ class AnalysisPackage.LinearRegression(object):
         np.save(dir_out + slash + "wavelet_power_sum_" + data_name + ".npy", power_sum)
         for i in list(range(len(power_sum))):
             np.savetxt(dir_out + slash + "wavelet_power_sum_" + data_name + "_ch" + str(i + 1) + ".txt",
-                       power_sum[i, ...], fmt="%.10f")
+                       power_sum[i, ...], fmt="%.10e")
 
     def bisector_angle_HCH(self, angle, xyz_raw=None, xyz_name=None):
         """This method calculates the angle between two vectors which are bisectors of H-C-H angles, assuming one of
