@@ -297,11 +297,11 @@ FileRead.findall(file_str, data_type)
             init_str = raw_str[:300*80]
         else:
             init_str = raw_str
-        pa = re.compile(r" Stoichiometry +([A-Za-z]+)", re.M)
+        pa = re.compile(r" NAtoms= +([0-9]+)", re.M)
         pr = pa.findall(init_str)
         if len(pr) == 0:
             raise Exception("Failed to find atom number in init_natom()!")
-        self.n_atom = len([i for i in pr[0] if i.isupper()])
+        self.n_atom = int(pr[0])
 
     def init_pattern(self):
         # This dictionary defines the regex strings for reading various physical quantities that are available in
