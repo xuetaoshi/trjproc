@@ -739,7 +739,7 @@ Example:
             else:
                 raise Exception("Did not specify n_log then failed to obtain log list from log_list parameter!")
         elif n_log > 0:
-            init_log_list = [str(i+1) + ext for i in list(range(n_log))]
+            init_log_list = [str(i+1) + self.ext for i in list(range(n_log))]
         else:
             raise Exception("Invalid n_log parameter passed in gen_log_list()!")
         return self.check_log_list(init_log_list, self.ext, self.slash)
